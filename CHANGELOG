@@ -1,3 +1,10 @@
+= 2011/05/03	0.401
+
+Added combinations for cross-product contexts.
+
+Added an example configuration to the documentation.
+
+User code can now habe strict and warnings.
 
 = 2009/07/24	0.302
 

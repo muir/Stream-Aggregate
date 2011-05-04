@@ -16,5 +16,20 @@ WriteMakefile(
 		'List::EvenMoreUtils'	=> 0,
 		'Config::YAMLMacros'	=> 0,
 		'Data::Dumper'		=> 0,
+		'List::MoreUtils'	=> 0,
+		'Clone'		=> 0,
 	},
 );
+
+package MY;
+
+sub postamble {
+    <<"END_OF_POSTAMBLE";
+
+pm_to_blib: README
+
+README: lib/Stream/Aggregate.pod
+	pod2text lib/Stream/Aggregate.pod >README
+
+END_OF_POSTAMBLE
+}

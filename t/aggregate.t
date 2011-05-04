@@ -14,7 +14,8 @@ my $finished = 0;
 END { ok($finished, 'finished') }
 
 my $aconfig = Load(<<'END_ACONFIG');
-debug: 0
+debug:                  0
+strict:                 1
 item_name:              $glide
 max_stats_to_keep:      4
 context:                return ($glide->{query}, $glide->{cid} || '')

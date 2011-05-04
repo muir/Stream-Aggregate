@@ -1,4 +1,5 @@
 lib/Stream/Aggregate.pm
+lib/Stream/Aggregate.pod
 lib/Stream/Aggregate/Random.pm
 lib/Stream/Aggregate/Stats.pm
 Makefile.PL
@@ -6,5 +7,8 @@ MANIFEST			This list of files
 t/aggregate.t
 t/aggregate2.t
 t/stats.t
+t/hospital.t
+t/h3.t
+t/urls.t
 CHANGELOG
 META.yml                                 Module meta-data (added by MakeMaker)

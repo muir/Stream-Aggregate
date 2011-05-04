@@ -19,12 +19,14 @@ use Tie::Function::Examples qw(%line_numbers);
 use Eval::LineNumbers qw(eval_line_numbers);
 use Config::YAMLMacros::YAML;
 use Carp qw(confess);
+use List::MoreUtils qw(uniq);
+use Clone qw(clone);
 
 require Exporter;
 
 our @ISA = qw(Exporter);
 our @EXPORT = qw(generate_aggregation_func);
-our $VERSION = 0.302;
+our $VERSION = 0.401;
 
 our $suppress_line_numbers = 0;
 
@@ -62,6 +64,7 @@ maxstr:                 '%maxstr value columns (column -> code)'
 keep:                   '%list of values to keep'
 stat:                   '%statistical columns (using keep, column -> code)'
 debug:                  '?<0>Print out the code for debugging'
+strict:                 '?<0>enforce strict and warnings for user code'
 preprocess:             '?Code to pre-process the input data[CODE]'
 item_name:              '?<$log>Name of the item variable'
 new_context:            '?Code that is run when there is a new context[CODE]'
@@ -72,6 +75,7 @@ reduce:                 '?Code that is run when reducing the saved data to save 
 merge_config:           '%optional configuration hash for "reduce" code'
 crossproduct:           '%crossproduct context, keys are existing columns, values are size limits'
 simplify:               '%code to choose new simpler values for over-full columns (column -> code)'
+combinations:           '%code to decide if new crossproduct context ($row) is worth keeping[CODE]'
 END_PROTOTYPE
 
 sub nonblank
@@ -126,6 +130,7 @@ sub generate_aggregation_func
 	my $cross_count = 0;
 	my %cross_key_values;
 	my %persist;
+	my @combinations;
 
 	# output
 	my $row;
@@ -159,6 +164,17 @@ sub generate_aggregation_func
 	my $finish_cross_func;
 	my $add_context_component_func;
 	my $cross_key_reduce_func;
+	my $declarations = '';
+	my %combination_funcs;
+	my $do_combinations;
+
+	my $strict = $agg_config->{strict}
+		? "use strict; use warnings;"
+		: "no strict; no warnings;";
+
+	my $eval_line_numbers = $agg_config->{debug}
+		? sub { $_[0] }
+		: \&eval_line_numbers;
 
 	if ($agg_config->{crossproduct} && keys %{$agg_config->{crossproduct}}) {
 		@cross_keys = sort keys %{$agg_config->{crossproduct}};
@@ -185,47 +201,58 @@ sub generate_aggregation_func
 			$varname{"\$column_$cc"} = $value;
 		};
 		my $usercode_inner = sub {
-			my ($cctype, $cc, $code) = @_;
-			return $alias_varname->($cc, $varname{$code}) if $varname{$code};
-			my $original = $code;
-			return $alias_varname->($cc, $varname{$code}) if $varname{$code};
-			$code =~ s/(\$column_\w+)/defined($varname{$1}) ? $varname{$1} : $1/ge;
-			if ($code =~ /\breturn\b/) {
-				$code =~ s/^/\t\t/mg;
+			#
+			# The {precount} undef statements may not be required.
+			# They are there to be safe, just in case someone is referencing
+			# a column that hasn't had its value assigned yet.  If so,
+			# they'll always get undef rather than a left-over value from
+			# a previous input record.
+			# 
+			my ($cctype, $cc, $cc_code) = @_;
+			if (! defined($cc_code)) {
+				$declarations	.= "my \$column_$cc;\n";
+				$s{precount}	.= "\tundef \$column_$cc;\n";
+				return;
+			}
+			return $alias_varname->($cc, $varname{$cc_code}) if $varname{$cc_code};
+			my $original = $cc_code;
+			return $alias_varname->($cc, $varname{$cc_code}) if $varname{$cc_code};
+			$cc_code =~ s/(\$column_\w+)/defined($varname{$1}) ? $varname{$1} : $1/ge;
+			if ($cc_code =~ /\breturn\b/) {
+				$cc_code =~ s/^/\t\t/mg;
 				$s{user}	.= qq{#line 3001 "FAKE-$extra->{name}-$cctype-$cc"\n} if $renumber;
 				$s{user}	.= "my \$${cctype}_${cc}_func = sub {\n";
-				$s{user}	.= $code;
+				$s{user}	.= $cc_code;
 				$s{user}	.= "};\n\n";
-				$s{user}	.= "my \$column_$cc;\n";
 				$s{precount}	.= "\tundef \$column_$cc;\n";
 				$s{$cctype}	.= "\t\$column_$cc = ";
 				$s{$cctype}	.= qq{\$${cctype}_${cc}_func->();\n};
-			} elsif ($code =~ /[;\n]/) {
-				$code =~ s/^/\t\t/mg;
-				$s{user}	.= "my \$column_$cc;\n";
+			} elsif ($cc_code =~ /[;\n]/) {
+				$cc_code =~ s/^/\t\t/mg;
 				$s{precount}	.= "\tundef \$column_$cc;\n";
 				$s{$cctype}	.= "\t\$column_$cc = ";
 				$s{$cctype}	.= "do {\n";
 				$s{$cctype}	.= qq{#line 4001 "FAKE-$extra->{name}-$cctype-$cc"\n} if $renumber;
-				$s{$cctype}	.= $code;
+				$s{$cctype}	.= $cc_code;
 				$s{$cctype}	.= "\n\t};\n";
-			} elsif ($code =~ /\A\$(column_\w+)\Z/) {
-				die "value of $code isn't available yet";
+			} elsif ($cc_code =~ /\A\$(column_\w+)\Z/) {
+				die "value of $cc_code isn't available yet, please compute it in an earlier step like 'ephemeral0'";
 			} else {
 				$s{$cctype}	.= qq{#line 5001 "FAKE-$extra->{name}-$cctype-$cc"\n} if $renumber;
 				$s{precount}	.= "\tundef \$column_$cc;\n";
-				$s{user}	.= "my \$column_$cc;\n";
-				$s{$cctype}	.= "\t\$column_$cc = $code;\n";
+				$s{$cctype}	.= "\t\$column_$cc = $cc_code;\n";
 			}
-			my $te = eval "no strict; no warnings; sub { $code }";
-			die "eval $cctype/$cc: $original ($code): $@" if $@;
+			$declarations		.= "my \$column_$cc;\n";
+
+			my $te = eval "no strict; no warnings; sub { $cc_code }";
+			die "eval $cctype/$cc: $original ($cc_code): $@" if $@;
 			my $body = $deparse->coderef2text($te);
 			return $varname{$body} if $varname{$body};
-			$varname{$body} = $varname{$code} = $varname{$original} = "\$column_$cc";
-			$alias_varname->($cc, $varname{$code});
+			$varname{$body} = $varname{$cc_code} = $varname{$original} = "\$column_$cc";
+			$alias_varname->($cc, $varname{$cc_code});
 		};
 		my $usercode = sub {
-			my ($cctype, $cc, $code) = @_;
+			my ($cctype, $cc, $cc_code) = @_;
 			my $value = $usercode_inner->(@_);
 			$var_value{$cc} = $value;
 			$var_types{$cc} = $cctype;
@@ -278,33 +305,33 @@ sub generate_aggregation_func
 			$s{fv_setup}	.= "\t# has keepers\n";
 			$s{fv_setup}	.= "\tlocal(\$Stream::Aggregate::Stats::ps) = \$ps;\n";
 
-			$s{keeper1}	.= resume_line_numbering;
+			$s{keeper1}	.= resume_line_numbering if $renumber;
 			$s{keeper1}	.= "\t# has keepers\n";
 			$s{keeper1}	.= "\tmy \$random = rand(1);\n";
 			$s{keeper1}	.= "\tif (\@{\$ps->{random}} < $max_stats2keep || \$random < \$ps->{random}[0]) {\n";
 			$s{keeper1}	.= "\t\tpush(\@{\$ps->{random}}, \$random);\n";
 
-			$s{keeper3}	.= resume_line_numbering;
+			$s{keeper3}	.= resume_line_numbering if $renumber;
 			$s{keeper3}	.= "\t\t# has keepers\n";
 			$s{keeper3}	.= "\t\t&\$reduce_func if \@{\$ps->{random}} > $max_stats2keep * 1.5;\n";
 			$s{keeper3}	.= "\t}\n";
 
-			$s{merge}	.= resume_line_numbering;
+			$s{merge}	.= resume_line_numbering if $renumber;
 			$s{merge}	.= "\t# has keepers\n";
 			$s{merge}	.= "\tpush(\@{\$ps->{random}}, \@{\$oldps->{random}});\n";
 
-			$s{merge2}	.= resume_line_numbering;
+			$s{merge2}	.= resume_line_numbering if $renumber;
 			$s{merge2}	.= "\t# has keepers\n";
 			$s{merge2}	.= "\t&\$reduce_func if \@{\$ps->{random}} > $max_stats2keep * 1.5;\n";
 
-			$s{reduce}	.= eval_line_numbers(<<'END_REDUCE');
+			$s{reduce}	.= $eval_line_numbers->(<<'END_REDUCE');
 				# has keepers
 				my $random = $ps->{random};
 				@keepers = sort { $random->[$a] cmp $random->[$b] } 0..$#$random;
 				@tossers = splice(@keepers, $max_stats2keep);
 				@$random = @$random[@keepers];
 END_REDUCE
-			$s{reduce} .= resume_line_numbering;
+			$s{reduce} .= resume_line_numbering if $renumber;
 		}
 
 		for $cc (sort keys %{$agg_config->{output}}) {
@@ -401,8 +428,10 @@ END_REDUCE
 		}
 		$s{final_values} .= "\t&\$finalize_result_func;\n" if $agg_config->{finalize_result};
 
-		my $code = qq{#line 1 "FAKE-all-code-for-$extra->{name}"\n};
-		$code .= qq{my $agg_config->{item_name};\n};
+		my $code = $strict;
+		$code .= qq{\n#line 1 "FAKE-all-code-for-$extra->{name}"\n} if $renumber;
+		$code .= qq{\nmy $agg_config->{item_name};\n};
+		$code .= $declarations;
 		$code .= "{\n";
 
 		$s{reduce} .= "\t&\$user_reduce_func;\n";
@@ -450,10 +479,10 @@ END_REDUCE
 				die "Crossproduct column '$cc' doesn't exist" unless $var_types{$cc};
 				die "Crossproduct column '$cc' ($var_types{$cc}) isn't a valid type (@cross_cols)" unless $cross_cols{$var_types{$cc}};
 
-				my $code = $agg_config->{simplify}{$cc} || 'return "*";';
+				my $cc_code = $agg_config->{simplify}{$cc} || 'return "*";';
 				$s{user}	.= "my \$simplify_$cc = sub {\n";
 				$s{user}	.= qq{#line 3001 "FAKE-$extra->{name}-simplify-$cc"\n} if $renumber;
-				$s{user}	.= "\t".$code;
+				$s{user}	.= "\t".$cc_code;
 				$s{user}	.= "\n};\n";
 
 				$loop_head	.= "\tmy %key_count_$cc;\n";
@@ -537,7 +566,7 @@ END_REDUCE
 			my $db2 = '';
 			$db1 = qq{print STDERR "Merging\t$loop_dbug_old (\$cross_data${oldsub}->{item_counter})\tinto\t$loop_dbug_new\t\$cross_count\\n";} if $agg_config->{debug};
 			$db2 = qq{print STDERR "Moving\t$loop_dbug_old (\$cross_data${oldsub}->{item_counter})\tto\t$loop_dbug_new\\n";} if $agg_config->{debug};
-			$s{cross_reduce} .= resume_line_numbering;
+			$s{cross_reduce} .= resume_line_numbering if $renumber;
 
 			$s{cross_reduce} .= "\t\$do_reduce = 0;\n";
 			$s{cross_reduce} .= "\tmy \$must_do = 0;\n";
@@ -547,7 +576,8 @@ END_REDUCE
 			$s{cross_reduce} .= $loop_out2;
 			$s{cross_reduce} .= $loop_mid;
 			$s{cross_reduce} .= $loop_in;
-			$s{cross_reduce} .= eval_line_numbers(<<END_CR);
+			$s{cross_reduce} .= $eval_line_numbers->(<<END_CR);
+				# --------------- reduce -------------
 				if (\$must_do) {
 					if (\$cross_data$newsub) {
 						\$cross_count--;
@@ -565,8 +595,9 @@ END_REDUCE
 						\$cross_data$newsub = delete \$cross_data$oldsub;
 					}
 				}
+				# --------------- reduce -------------
 END_CR
-			$s{cross_reduce} .= resume_line_numbering;
+			$s{cross_reduce} .= resume_line_numbering if $renumber;
 			$s{cross_reduce} .= $loop_out;
 
 			#
@@ -574,7 +605,7 @@ END_CR
 			#
 			my $db3 = '';
 			$db3 = qq{print STDERR "Cross-count: \$cross_count\\n";} if $agg_config->{debug} > 3;
-			$s{crossproduct} .= eval_line_numbers(<<END_CP);
+			$s{crossproduct} .= $eval_line_numbers->(<<END_CP);
 				if (\$cross_count > \$cross_limit * 2) {
 					&\$cross_reduce_func;
 				}
@@ -587,43 +618,160 @@ END_CR
 					$db3
 				}
 END_CP
-			$s{crossproduct} .= resume_line_numbering;
+			$s{crossproduct} .= resume_line_numbering if $renumber;
+
+			#
+			# handle combinations
+			#
+			$s{inner_combine} = '';
+			$s{outer_combine} = '';
+			if ($agg_config->{combinations}) {
+				my $generate_combinations;
+				my $combination_number = 0;
+				my %mapping;
+				$generate_combinations = sub {
+					my ($output_field, $input_ps, $indent, $keys, $done, $loop_over) = @_;
+					my $out = \$s{$output_field};
+					my $loopout = '';
+					my $x = '';
+					my $y = '';
+					my @loop_keys = grep { $agg_config->{combinations}{$_} && ! $done->{$_} } sort @$keys;
+					my @delayed_call;
+					if ($loop_over) {
+						for my $k (@loop_keys) {
+							$$out .= "$indent$x	for my \$ck_$k (keys %{$input_ps}) {\n";
+							$loopout = "$indent$x	}\n$loopout";
+							$x .= "\t";
+							$input_ps .= "{\$ck_$k}";
+						}
+						$y = $x;
+						if (! @loop_keys) {
+							$y .= "\t";
+							$$out .= "$indent$x	if ($input_ps) {\n";
+						}
+						$$out .= "$indent$y	\$row = ${input_ps}->{row};\n";
+					}
+					for my $cc (@loop_keys) {
+						my @keeping = grep { $_ ne $cc } @loop_keys;
+						if ($mapping{"@keeping"}++) {
+							$$out .= "$indent$x	# we've already handled keeping '@keeping'\n";
+							next;
+						}
+
+						my $accessor = @keeping
+							? "{" . join("}{", map { "\$row->{'$_'}" } @keeping) . "}"
+							: '';
+
+						if ($loop_over && @keeping) {
+							$accessor = "{" . join("}{", map { "\$ck_$_" } @keeping) . "}"
+						}
+
+						# yes, we're using auto-vivification.  It's ugly, but simplifies
+						# the code.
+
+						$$out .= "\n";
+						$$out .= "$indent$x	# combine, dropping $cc";
+						$$out .= 			", keeping: @keeping" if @keeping;
+						$$out .= "\n";
+
+						$$out .= "$indent$x	if (\$combination_funcs{'$cc'}->()) {\n";
+						$$out .= "$indent$x		if (\$combinations[$combination_number]$accessor) {\n";
+						$$out .= "$indent$x			local(\$Stream::Aggregate::Stats::ps)\n";
+						$$out .= "$indent$x				= \$ps\n";
+						$$out .= "$indent$x				= \$combinations[$combination_number]$accessor;\n";
+						$$out .= "$indent$x			\$oldps = $input_ps;\n" if $input_ps ne '$oldps';
+						$$out .= "$indent$x			&\$merge_func;\n";
+						$$out .= "$indent$x		} else {\n";
+						$$out .= "$indent$x			\$ps = \$combinations[$combination_number]$accessor = clone($input_ps);\n";
+						$$out .= "$indent$x			\$ps->{row} = { %\$row };\n";
+						$$out .= "$indent$x			delete \$ps->{row}{'$cc'};\n";
+						$$out .= "$indent$x		}\n";
+						$$out .= "$indent$x	}\n";
+
+						my $pnum = $combination_number++;
+
+						push(@delayed_call, sub {
+							$generate_combinations->(
+								outer_combine => "\$combinations[$pnum]", 
+								"", 
+								\@keeping, 
+								{ %$done, $cc => 1 },
+								$cc);
+						});
+					}
+					if ($loop_over) {
+						$$out .= "\n";
+						$$out .= "$indent$y	# final values with '@loop_keys' keys\n";
+						$$out .= "$indent$y	local(\$Stream::Aggregate::Stats::ps) = \$ps = ${input_ps};\n";
+						$$out .= "$indent$y	\$suppress_result = 0;\n";
+						$$out .= "$indent$y	\$final_values_func->();\n";
+						$$out .= "$indent$y	push(\@\$retref, \$row) unless \$suppress_result;\n";
+						$$out .= "\n";
+						if (! @loop_keys) {
+							$$out .= "$indent$x	}\n";
+						}
+
+						$$out .= $loopout;
+					}
+					while (my $dc = shift(@delayed_call)) {
+						$dc->();
+					}
+
+				};
+				$generate_combinations->(
+					inner_combine => '$oldps', 
+					"\t\t\t", 
+					\@cross_keys, 
+					{}, 
+					undef);
+			}
 
 			#
 			# Return the cross product results
 			#
 			$s{finish_cross} .= qq{print STDERR "Finish cross called\n";} if $agg_config->{debug} > 7;
 			$s{finish_cross} .= qq{print STDERR YAML::Dump('cross_data-before',\$cross_data);\n} if $agg_config->{debug} > 8;
-			$s{finish_cross} .= "my (\$retref) = shift;\n";
-			$s{finish_cross} .= "&\$cross_reduce_func;\n";
+			$s{finish_cross} .= "\tmy (\$retref) = shift;\n";
+			$s{finish_cross} .= "\tmy \$rowtmp;\n";
+			$s{finish_cross} .= "\t&\$cross_reduce_func;\n";
 			$s{finish_cross} .= qq{print STDERR YAML::Dump('cross_data-after',\$cross_data);\n} if $agg_config->{debug} > 8;
 			$s{finish_cross} .= $loop_in2;
-			$s{finish_cross} .= eval_line_numbers(<<END_FC);
+			$s{finish_cross} .= $eval_line_numbers->(<<END_FC);
+				# --------------- finish cross -------------
 				local(\$Stream::Aggregate::Stats::ps) 
 					= \$ps
 					= \$cross_data$oldsub;
 				confess unless \$ps;
 				\$suppress_result = 0;
-				\$row = { &\$context_columns_func $loop_mid3 };
+				\$rowtmp = \$row = { &\$context_columns_func $loop_mid3 };
 				&\$final_values_func;
 				push(@\$retref, \$row) unless \$suppress_result;
 				\$oldps = delete \$cross_data$oldsub;
+				\$oldps->{row} = \$row;
 				\$ps = \$contexts[-1];
 				&\$merge_func if \$ps;
 				\$cross_count--;
 				$db3
 END_FC
-			$s{finish_cross} .= resume_line_numbering;
+			$s{finish_cross} .= delete $s{inner_combine};
+			$s{finish_cross} .= "\t\t\t\t# --------------- finish cross -------------\n";
+			$s{finish_cross} .= resume_line_numbering if $renumber;
 			$s{finish_cross} .= $loop_out2;
+			$s{finish_cross} .= delete $s{outer_combine};
+		} elsif ($agg_config->{combinations}) {
+			die "combinations requires crossproduct which isn't defined";
 		}
 
-		$code .= eval_line_numbers(<<'END_FIELDS');
+		$code .= $eval_line_numbers->(<<'END_FIELDS');
+
 			my $compile_user_code = sub {
 				my ($c, $field, $config_key, $default) = @_;
 				return $default unless defined $c->{$field};
 				my $config = $c->{$config_key} || {};   # maybe used by eval
 				my $coderef;
-				my $code = qq{#line 2001 "FAKE-$extra->{name}-$field"\n sub { $c->{$field} }; };
+				my $code = $strict;
+				$code .= qq{\n#line 2001 "FAKE-$extra->{name}-$field"\n} if $renumber;
+				$code .= qq{sub { $c->{$field} }; };
 				my $sub = eval $code;
 				die "Cannot compile user code for $extra->{name}/$field: $@\n$code" if $@;
 				return $coderef if $coderef;
@@ -640,6 +788,13 @@ END_FC
 			$user_new_context_func	= $compile_user_code->($agg_config, 'new_context',		'new_context_config',		sub { return () });
 			$user_merge_func	= $compile_user_code->($agg_config, 'merge',			'merge_config',			sub { return () });
 			$user_reduce_func	= $compile_user_code->($agg_config, 'reduce',			'reduce_config',		sub { return () });
+
+			if ($agg_config->{crossproduct} && $agg_config->{combinations}) {
+				for my $crosskey (uniq(keys(%{$agg_config->{crossproduct}}), keys(%{$agg_config->{combinations}}))) {
+					$combination_funcs{$crosskey} = $compile_user_code->($agg_config->{combinations}, $crosskey, "combine on $crosskey", sub { 0 });
+				}
+			}
+
 END_FIELDS
 		$code .= "\t\$itemref = \\$agg_config->{item_name};\n";
 		$code .= "}\n";
@@ -659,6 +814,7 @@ END_FIELDS
 		$s{new_ps} .= "\t\$ps->{unfiltered_counter} = 0;\n"		if $agg_config->{filter};
 		$s{new_ps} .= "\t&\$initialize_func;\n"				if $s{initialize};
 		$s{new_ps} .= "\t&\$user_new_context_func;\n"			if $agg_config->{new_context};
+		$s{new_ps} .= "\t\$ps->{row} = undef;\n";
 		$s{new_ps} .= "\tlock_keys(%\$ps);\n";
 
 		#
@@ -667,7 +823,7 @@ END_FIELDS
 
 		$s{process} .= "\t\$last_item = \$\$itemref;\n"
 			if Dump($agg_config) =~ /\$last_item\b/;
-		$s{process} .= eval_line_numbers(<<'END_P0');
+		$s{process} .= $eval_line_numbers->(<<'END_P0');
 			$last_item = $$itemref;
 			($$itemref) = @_;
 			my @ret;
@@ -678,75 +834,84 @@ END_FIELDS
 				return @ret;
 			}
 END_P0
-		$s{process} .= eval_line_numbers(<<'END_P1') if $agg_config->{preprocess};
+		$s{process} .= $eval_line_numbers->(<<'END_P1') if $agg_config->{preprocess};
 
 			&$preprocess_func;
 
 END_P1
-		$s{process} .= eval_line_numbers(<<'END_P2') if $agg_config->{filter};
+		$s{process} .= $eval_line_numbers->(<<'END_P2') if $agg_config->{filter} && $agg_config->{filter_early};
 
-			$count_this = $agg_config->{filter_early}
-				? &$filter_func
-				: 1;
+			$count_this = &$filter_func;
 END_P2
-		$s{process} .= eval_line_numbers(<<'END_P3') if $agg_config->{passthrough};
+		$s{process} .= $eval_line_numbers->(<<'END_P3') if $agg_config->{passthrough};
 
 			push(@ret, &$passthrough_func);
 
 END_P3
-		$s{process} .= eval_line_numbers(<<'END_P4') if $agg_config->{filter};
 
-			if ($count_this) {
+		if ($agg_config->{context}) {
+			$s{process} .= $eval_line_numbers->(<<'END_P4') if $agg_config->{filter} && $agg_config->{filter_early};
+
+				if ($count_this) {
 
 END_P4
-		$s{process} .= eval_line_numbers(<<'END_P5') if $agg_config->{context};
+			$s{process} .= $eval_line_numbers->(<<'END_P5');
 
-				my @new_context = &$get_context_func;
-				my @new_strings = $stringify_func->(@new_context);
+					my @new_context = &$get_context_func;
+					my @new_strings = $stringify_func->(@new_context);
 
-				my $diffpos = list_difference_position(@new_strings, @context_strings);
+					my $diffpos = list_difference_position(@new_strings, @context_strings);
 
-				if (defined $diffpos) {
-					$finish_context_func->(\@ret)
-						while @current_context >= $diffpos;
-				}
+					if (defined $diffpos) {
+						$finish_context_func->(\@ret)
+							while @current_context >= $diffpos;
+					}
 
-				while (@new_context > @current_context) {
-					$add_context_component_func->($new_context[@current_context], $new_strings[@current_context]);
-				}
+					while (@new_context > @current_context) {
+						$add_context_component_func->($new_context[@current_context], $new_strings[@current_context]);
+					}
 END_P5
 
-		$s{process} .= eval_line_numbers(<<'END_P7') if $agg_config->{filter};
-			}
+			$s{process} .= $eval_line_numbers->(<<'END_P7') if $agg_config->{filter} && $agg_config->{filter_early};
+				}
 
-			$ps->{unfiltered_counter}++;
-
-			$count_this = &$filter_func if ! $agg_config->{filter_early};
-
-			if ($count_this) {
 END_P7
+		}
+
+		$s{process} .= $eval_line_numbers->(<<'END_P7A') if $agg_config->{filter} && ! $agg_config->{filter_early};
+
+			$count_this = &$filter_func;
+END_P7A
+
+		$s{process} .= $eval_line_numbers->(<<'END_P7B') if $agg_config->{filter} && ! $agg_config->{context};
+				if ($count_this) {
+END_P7B
 		
-		$s{process} .= eval_line_numbers(<<'END_P8');
-				&$count_func;
-				$ps->{item_counter}++;
+		$s{process} .= $eval_line_numbers->(<<'END_P8');
+					&$count_func;
+					$ps->{item_counter}++;
 END_P8
-		$s{process} .= eval_line_numbers(<<'END_P9') if $agg_config->{filter};
-			}
+
+		# this closes the if ($count_this) in P3 or in P7B 
+		$s{process} .= $eval_line_numbers->(<<'END_P9') if $agg_config->{filter};  
+				}
+				$ps->{unfiltered_counter}++;
 END_P9
-		$s{process} .= eval_line_numbers(<<'END_P10');
+
+		$s{process} .= $eval_line_numbers->(<<'END_P10');
 			return @ret;
 END_P10
-		$s{process} .= resume_line_numbering;
+		$s{process} .= resume_line_numbering if $renumber;
 
 		#
 		# Merge contexts func
 		#
 
 		$s{merge0} .= "print STDERR YAML::Dump('MERGE', \$ps, \$oldps);\n" if $agg_config->{debug} > 11;
-		$s{merge0} .= resume_line_numbering;
+		$s{merge0} .= resume_line_numbering if $renumber;
 		$s{merge0} .= "\t\$ps->{item_counter} += \$oldps->{item_counter};\n";
 		$s{merge0} .= "\t\$ps->{unfiltered_counter} += \$oldps->{unfiltered_counter};\n" if $agg_config->{filter};
-		$s{merge3} .= resume_line_numbering;
+		$s{merge3} .= resume_line_numbering if $renumber;
 		$s{merge3} .= "\t&\$user_merge_func;\n";
 
 		$s{fv_setup} .= "print STDERR YAML::Dump('final_values', \$ps);\n" if $agg_config->{debug} > 12;
@@ -834,542 +999,4 @@ sub validate_aggregation_config
 }
 
 1;
-
-__END__
-
-=head1 NAME
-
- Stream::Aggregate - generate aggregate information from a stream of data
-
-=head1 SYNOPSIS
-
- use Stream::Aggregate;
-
- my $af = generate_aggregation_func($agg_config, $extra_parameters, $user_extra_parameters);
-
- while ($log = ???) {
-	@stats = $af->($log);
- }
- @stats = $af->(undef);
-
-=head1 DESCRIPTION
-
-Stream::Aggregate is a general-purpose aggregation module that will aggregate from a 
-stream of perl objects.  While it was written specifically for log processing, it can be used
-for other things too.  The input records for the aggregator must be sorted in the order
-of the contexts you will aggregate over.   If you want to count things by URL, then you
-must sort your input by URL.
-
-Aggregation has two key elements: how you group things, and what you aggregate.  This module
-understands two different ways to group things: nested and cross-product.
-
-Nested groupings come from processing sorted input: if you have three fields you are 
-considering your context, the order in which the data is sorted must match the order in
-which these fields make up your context.
-
-Cross-prodcut groupings come from processing unsorted input.  Each combination of values
-of the fields that make up your context is another context.  This can lead to memory 
-exhaustion so you must specify the maximum number of values for each of the fields.
-
-=head2 Nested groupings
-
-Nested groups are most easily illustrated with a simple example: aggregating by year,
-month, and day.  The input data must be sorted by year, month, and day.  A single time
-sort will do that, but other combinations aren't so easy.  The current context is
-defined by the tiplet: (year, month, day).  That triplet must be returned by the
-C<context> code.  It is stored in the C<@current_context> array.  When a context is
-finished, it must be converted into a hash by C<context2columns>.
-
-Doing it this way, you can, for example, get the average depth per day, per month, and
-per year in one pass though your data.
-
-=head2 Cross-Product grouping
-
-Cross Product grouping does not depend on the sort order of the input and can have
-many contexts active at the same time.  
-
-For example, if you're aggregating sales figures for shoes and want statistics for
-the combinations of size, width, and color there isn't a sort or nesting order that will
-answer your questions.
-
-Use C<crossproduct> to limit yourself to a certain number of values for each variable
-(say 10 sizes, 3 widths, and 5 colors).
-
-=head2 API
-
-The configuration for Stream::Aggregate is compiled into a perl function which is
-then called once for each input object.  Each time it is called, it may produce one or more
-aggregate objects.  When there is no more input data, call the function with C<undef>.
-
-The generate-the-function routine, C<generate_aggregation_func> takes three parameters.  The
-first is the configuration object (defined below) that is expected (but not required) to come
-from a YAML file.   The second and third provide extra information.  Currently they are only used
-to get a description of what this aggregation is trying to do using the C<name> field.  Eg:
-
- generate_aggregation_func($agg_config, $extra, $user_extra);
-
- my $code = qq{#line 1 "FAKE-all-code-for-$extra->{name}"\n};
-
-The configuration object for Stream::Aggregate is expected to be read from a YAML
-file but it does not have to come in that way.
-
-For some of the code fields (below), marked as B<Closure/Config>, you can
-provide a closure instead of code.  To do that, have a C<BEGIN> block set
-C<$coderef> to the closure.  If set, code outside the C<BEGIN> block
-will only be compiled (never run).  When evalutating the BEGIN block, 
-C<$agg_config> will be set to the value of I<key_config> (assuming the field was I<key>).
-
-The behavior of C<generate_aggregation_func> in array connect may change in the future to
-provide additional return values. 
-
-=head2 CONTEXT-RELATED CONFIGURATION PARAMETERS
-
-As the aggregator runs over the input, it needs to know the boundries of the contexts 
-so that it knows when to generate an aggregation result record.
-
-For nested groupings,
-to aggregate over URLs, you need to sort your input by URL and you need to 
-define a C<context> that returns the URL:
-
- context: |
-   return ($log->{url})
-
-If you want to aggregate over both the URL and the web host, the C<context> 
-must return an array: host & URL:
-
- context: |
-   $log->{url} =~ m{(?:https?|ftp)://([^/:]+)}
-   my $host = $1;
-   return ($host, $log->{url})
-
-When the context is has multiple levels like that, there will be a resultant
-aggregation record for each level.  
-
-=over 23
-
-=item context
-
-B<Code, Optional>.  Given a C<$log> entry, return an array that describes the aggregation context.  For
-example, for a URL, this array might be: domain name; host name (if different from domain name);
-each component of the path of the URL except the final filename.   As Aggregate runs, it will
-generate an aggregation record for each element of the array.
-
-This code will be invoked on every input record.
-
-=item context2columns
-
-B<Code, Optional>.
-Given a context, in C<@current_context>, return additional key/value pairs for the resulting 
-aggregation record.  This is how the context gets described in the aggregation results
-records.
-
-This code will be invoked to generate resultant values just before a context is closed.
-
-If this code sets the variable C<$suppress_result>, then this aggregation result will be
-discarded.
-
-=item stringify_context
-
-B<Code, Optional>.
-
-If the new context array returned by the C<context2columns> code
-(soon to become C<@current_context>) is not an array of
-strings but rather an array of references, it will be turned into strings using
-YAML.
-
-If this isn't what you want, use C<stringify_context> to do something different.
-Unlike most of the other functions, C<stringify_context> operates on C<@_>.
-
-This will be invoked for every input record.
-
-=item crossproduct
-
-B<Hash, Name-E<gt>Number, Optional>.
-
-For crossproduct groupings, this defines the dimensions.   The keys are the variables.
-The values are the maximum number of values for each variable to track.
-
-The keys must be C<ephemeral0>, C<ephemeral>, or C<ephemeral2> column names.
-
-=item simplify
-
-B<Hash, Name-E<gt>Code, Optional>.
-
-When a cross-product key is exceeding its quota of values, the default replacement
-value is C<*>.  This hash allows you to override the code that chooses the new
-value.
-
-=item finalize_result
-
-B<Code, Optional, Closure/Config>.
-
-This code will be called after the resultant values for a context have been calculated.
-It is a last-chance to modify them or to suppress the results.  The values can be found
-as a reference to a hash: C<$row>.  To suppress the results, set C<$suppress_results>.
-
-=item new_context
-
-B<Code, Optional, Closure/Config>.
-
-This code will be called each time there is a new context.  At the time it is called, 
-C<$ps> is a reference to the new context, but C<@current_context> will not yet have been
-updated.
-
-=item merge
-
-B<Code, Optional, Closure/Config>.
-
-When using multiple levels of contexts, data is counted for the top-most context layer
-only.  When that top-most layer finishes, the counts are merged into the next more-general
-layer. 
-
-During the merge there is both C<$ps> and C<$oldps> available to for code to reference.
-
-=back
-
-=head2 CONTROL FLOW CONFIGURATION
-
-=over 23
-
-=item filter
-
-B<Code, Optional>.
-Before any of the columns are calculated or any of the values saved, run this filter
-code.  If it returns a true value then proceed as normal.  If it returns a false value,
-then do not consider it for any of the statistics values.   The filter code an remember
-things in C<$ps->{heap}> that might effect how other things are counted.  Filtered 
-
-In some situations, you many want to throw away most data and count things in the
-filter.  When doing that, it may be that all of the columns come from 
-C<output>.
-
-B<This may be redesigned, avoid using for the time being>.
-
-=item filter_early
-
-B<Boolean, Optional>, default C<false>.
-Check the filter early before figuring out contexts?  If so, and the result is
-filtered, don't check to see if the context changed.
-
-=item passthrough
-
-B<Code, Optional>.
-Add results to the output of the aggregation.  A value of C<$log> adds the input
-data to the output.
-
-=back
-
-=head2 PARAMETERS CONFIGURATION
-
-=over 23
-
-=item max_stats_to_keep
-
-B<Number, Optional>, default: 4000.
-
-When aggregating large amounts of data, limit memory use by throwing away some of the
-data.  When data is thrown away, keep this number of samples for statistics functions
-that need bulk data like standard_deviation.
-
-=item reduce
-
-B<Code, Optional, Closure/Config>.
-
-When C<max_stats_to_keep> is exceeded, data will be thrown away.  This function
-will be called when that has happened.
-
-=item preprocess
-
-B<Code, Optional>.
-Code to preprocess the input C<$log> objects.
-
-=item item_name
-
-B<String, Optional>, default: C<$log>.
-In the rest of the code, use call the input data something other than C<$log>.   This
-anticipates using this module for something other than log data.
-
-=item debug
-
-B<Boolean, Optional>.
-Print out some debugging information, including the code that is generated for 
-building the columns.
-
-=back
-
-=head2 AGGREGATE OUTPUT COLUMNS CONFIGURATION
-
-Each of these (except C<ephemeral> & C<keep>) defines additional columns of
-output that will be included in each aggregation record.   Thse are all optional and
-all defined as key/value pairs where the keys are column names and the values are perl
-code.  You can refer to previous columns using the variable 
-C<$column_I<column_name>> where I<column_name> is the name of one of the other
-columns.   When refering to other columns, the order in which columns are processed
-matters: C<ephemeral> and C<keep> are processed first and second respecively.
-Idential code fragments will be evaluated only once.  Within a group, columns are
-evaluated alphabetically.
-
-Some of the columns will have their code evaluated per-item and some are evaluated per-aggregation.
-
-The input data is in C<$log> unless overriden by C<item_name>.
-
-=head3 Per item callbacks
-
-=over 23
-
-=item ephemeral
-
-These columns will not be included in the aggregation data.  Refer to them
-as C<$column_I<column_name>>.
-
-=item ephemeral0
-
-Same as C<ephemeral>, will be evaluated before C<ephemeral>.
-
-=item ephemeral2
-
-Same as C<ephemeral>, will be evaluated after C<ephemeral>.
-
-=item counter
-
-Keep a counter.  Add one if the code returns true.
-
-=item percentage
-
-Keep a counter.  Include the percentage of items for which the code returned
-true as an output column as opposed to the number of items where the code
-return C<0>.  A return value of C<undef> does not count at all.
-
-=item sum
-
-Keep an accumulator.  Add the return values.
-
-=item mean
-
-Keep an accumulator.  Add the return values.
-Divide by the number of items before inserting into the results.
-Items whose value is C<undef> do not count towards the number of items.
-
-=item standard_deviation
-
-Remeber the return values.  Compute the standard deviation of the
-accumulated return values and insert that into the results.
-Items whose value is C<undef> are removed before calculating the
-standard_deviation.
-
-=item median
-
-Remeber the return values.  Compute the median of the
-accumulated return values and insert that into the results.
-Items whose value is C<undef> are removed before calculating the
-median.
-
-=item dominant
-
-Remeber the return values.  Compute the mode (most frequent) of the
-accumulated return values and insert that into the results.
-Items whose value is C<undef> are removed before calculating the
-mode.
-
-=item min
-
-Keep a minimum value.  
-Replace it with the return value if the return value is
-less
-than the current value.
-Items whose value is C<undef> are removed before calculating the min.
-
-=item max
-
-Keep a maximum value.  
-Replace it with the return value if the return value is
-greater
-than the current value.
-Items whose value is C<undef> are removed before calculating the max.
-
-=item minstr
-
-Keep a minimum string value.  
-Replace it with the return value if the return value is
-less
-than the current value.
-Items whose value is C<undef> are removed before calculating the minstr.
-
-=item maxstr
-
-Keep a maximum string value.  
-Replace it with the return value if the return value is
-greater
-than the current value.
-Items whose value is C<undef> are removed before calculating the maxstr.
-
-=item keep
-
-Remember the return values.   The return values are 
-available at aggregation time as 
-C<@{$ps-E<gt>{keep}{column_name}}>.
-Items whose value is C<undef> are kept but they're ignored 
-by L<Stream::Aggregate::Stats> functions.
-
-=back
-
-=head3 Per aggregation result record callbacks
-
-For code that is per-aggregation, the saved aggregation state can be found in C<$ps>.  One item that
-is probably needed is C<$ps-E<gt>{item_count}>.
-
-=over 23
-
-=item output
-
-Extra columns to include in the output.  This is where to save C<$ps-E<gt>{item_count}>.
-
-=item stat
-
-Use arbitrary perl code to compute statistics on remembered
-return values kept with C<keep>.  Write your own function or
-use any of the functions in L<Stream::Aggregate::Stats>
-(the global variable is pre-loaded).    No, there isn't any
-difference between this and C<output>.
-
-=back
-
-=head2 VARIALBES AVAILABLE FOR CODE SNIPPETS TO USE
-
-The following variables are available for the code that generates per-item and 
-per-aggregation statistics:
-
-=over 23
-
-=item $log
-
-The current item (unless overridden by C<item_name>)
-
-=item $ps-E<gt>{keep}{column_name}
-
-An array of return values kept by C<keep>.
-
-=item $ps-E<gt>{numeric}{column_name}
-
-If L<Stream::Aggregate::Stats> functions are called, they will grab the 
-numeric values from C<$ps-E<gt>{keep}{column_name}> and store them in
-C<$ps-E<gt>{numeric}{column_name}>
-
-=item $ps-E<gt>{random}
-
-For each kept item in C<$ps-E<gt>{keep}{column_name}>,
-there is a corrosponding item in $ps-E<gt>{random} that is
-a random number.  These random numbers are used to determine
-which values to keep and which values to toss if there are too
-many values to keep them all.
-
-=item $ps-E<gt>{$column_type}{column_name}
-
-For each type of column (output, counter, percentage, sum, min,
-standard_deviation, median, stat) the values that will be part
-of the final aggregation record.
-
-=item $ps-E<gt>{$tempoary_type}{column_name}
-
-Some columns need temporary storage for their values:
-percentage_counter (the counter used by percentage);
-percentage_total (the number of total items);
-mean_sum (the sum used to compute the mean);
-mean_count (the number of items for the mean).
-
-=item $ps-E<gt>{heap}
-
-A hash that can be used by the configured perl code for whatever
-it wants.
-
-=item $ps-E<gt>{item_counter}
-
-The count of items.
-
-=item $agg_config
-
-The configuration object for Stream::Aggregate
-
-=item $itemref
-
-A reference to C<$log>.  It's always C<$itemref> even if C<$log> is
-something else.
-
-=item @current_context
-
-The current context as returned by C<context>.
-
-=item @context_strings
-
-The string-ified version C<@current_context> as returned by 
-C<stringify_context> or L<YAML>.
-
-=item @contexts
-
-The array of context objects.  C<$ps> is always C<$context[-1]>.
-
-=item @items_seen
-
-An array that counts the number of rows of output from this aggregation.
-When the context is multi-level, the counter is multi-level.  For example,
-if the context is I<domain>, I<host>, and I<URL>; then 
-C<$items_seen[0]> is the number of I<domains> (so far), and 
-C<$items_seen[1]> is the number of I<hosts> for this I<domain> (so far), 
-and C<$items_seen[2]> is the number of I<URLs> for this I<host> (so far).
-
-Passthrough rows do not count.
-
-=item $row
-
-When gather results, the variable that holds them is a reference to
-a hash: C<$row>.
-
-=item $suppress_result
-
-After gathering results, the C<$suppress_result> variable is examined.
-If it's set the results (in C<$row>) are discards.
-
-To skip results that aren't crossproduct results, 
-in C<finalize_result>, set C<$suppress_result> if C<$cross_count> isn't true.
-
-=item $cross_count
-
-The number of currently active crossproduct accumulator contexts.
-
-=item $extra, $user_extra
-
-The additional paramerts (beyond C<$agg_config>) that were passed to 
-C<generate_aggregation_func()>.
-
-=item %persist
-
-This hash is not used by Stream::Aggregate.  It's available for
-any supplied code to use however it wants.
-
-=item $last_item
-
-A refernece to the previous C<$log> object.  This is valid during 
-C<finalize_result> and C<context2columns>.
-
-=back
-
-There are more.  Read the code.
-
-=head2 HELPER FUNCTIONS
-
-The following helper functions are available: 
-everything in L<Stream::Aggregate::Stats> and:
-
-=over
-
-=item nonblank($value)
-
-Returns $value if $value is defined and not the empty string.   Returns undef otherwise.
-
-=back
-
-=head1 LICENSE
-
-This package may be used and redistributed under the terms of either
-the Artistic 2.0 or LGPL 2.1 license.
 

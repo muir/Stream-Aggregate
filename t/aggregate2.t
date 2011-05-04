@@ -16,6 +16,7 @@ END { ok($finished, 'finished') }
 
 my $aconfig = Load(<<'END_ACONFIG');
 debug:                  0
+strict:                 1
 item_name:              $shoe
 max_stats_to_keep:      4
 crossproduct:
