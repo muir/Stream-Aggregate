@@ -1,0 +1,20 @@
+--- #YAML:1.0
+name:                Aggregate
+version:             0.302
+abstract:            Aggregate a data stream
+license:             ~
+author:              
+    - David Muir Sharnoff <muir@idiom.org>
+generated_by:        ExtUtils::MakeMaker version 6.42
+distribution_type:   module
+requires:     
+    B::Deparse:                    0
+    Config::Checker:               0
+    Config::YAMLMacros:            0
+    Data::Dumper:                  0
+    Hash::Util:                    0
+    List::EvenMoreUtils:           0
+    List::Util:                    0
+meta-spec:
+    url:     http://module-build.sourceforge.net/META-spec-v1.3.html
+    version: 1.3
