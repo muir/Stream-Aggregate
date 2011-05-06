@@ -18,9 +18,6 @@ DESCRIPTION
     Stream::Aggregate is a general-purpose aggregation module that will
     aggregate from a stream of perl objects. While it was written
     specifically for log processing, it can be used for other things too.
-    The input records for the aggregator must be pre-sorted in the order of
-    the contexts you will aggregate over. If you want to count things by
-    URL, then you must sort your input by URL.
 
     Aggregation has two key elements: how you group things and what you
     aggregate. This module understands two different ways to group things:
@@ -29,6 +26,8 @@ DESCRIPTION
     Nested groupings come from processing sorted input: if you have three
     fields you are considering your context, the order in which the data is
     sorted must match the order in which these fields make up your context.
+    If you want to count things by URL, then you must sort your input by
+    URL.
 
     Cross-product groupings come from processing unsorted input. Each
     combination of values of the fields that make up your context is another
@@ -61,7 +60,8 @@ DESCRIPTION
     The configuration for Stream::Aggregate is compiled into a perl function
     which is then called once for each input object. Each time it is called,
     it may produce one or more aggregate objects as output. When there is no
-    more input data, call the function with as its input "undef".
+    more input data, call the aggregation function with "undef" as its
+    input.
 
     The generate-the-function routine, "generate_aggregation_func" takes
     three parameters. The first is the configuration object (defined below).
@@ -80,12 +80,12 @@ DESCRIPTION
 
     For some of the code fields (below), marked as Closure/Config, you can
     provide a closure instead of code. To do that, have a "BEGIN" block
-    assign a value to $coderef (the closure). If set, code outside the
-    "BEGIN" block will only be compiled (never run). When evalutating the
-    BEGIN block, $agg_config will be set to the value of *key_config*
-    (assuming the field was *key*).
+    assign a value (the closure) to the variable $coderef. If you do this,
+    code outside the "BEGIN" block will only be compiled but will never be
+    run. When evalutating the BEGIN block, the variable $agg_config will be
+    set to the value of *key_config* (assuming the field was *key*).
 
-    The behavior of "generate_aggregation_func" in array connect may change
+    The behavior of "generate_aggregation_func" in array context may change
     in the future to provide additional return values.
 
   CONTEXT-RELATED CONFIGURATION PARAMETERS
@@ -142,13 +142,12 @@ DESCRIPTION
     stringify_context      Code, Optional.
 
                            If the new context array returned by the
-                           "context2columns" code (soon to become
-                           @current_context) is not an array of strings but
-                           rather an array of references, it will be turned
-                           into strings using YAML. These strings may not
-                           matter because you control how the context
-                           manifests in the result records with
-                           "context2columns".
+                           "context" code (soon to become @current_context)
+                           is not an array of strings but rather an array of
+                           references, it will be turned into strings using
+                           YAML. These strings may not matter because you
+                           control how the context manifests in the result
+                           records with "context2columns".
 
                            If this isn't what you want, use
                            "stringify_context" to do something different.
@@ -252,7 +251,8 @@ DESCRIPTION
                            This code will be called each time there is a new
                            context. At the time it is called, $ps is a
                            reference to the new context, but
-                           @current_context will not yet have been updated.
+                           @current_context will not yet have been updated
+                           to the new value.
 
     merge                  Code, Optional, Closure/Config.
 
@@ -262,17 +262,20 @@ DESCRIPTION
                            merged into the next more-general layer.
 
                            During the merge there is both $ps and $oldps
-                           available to for code to reference.
+                           available to for code to reference. The default
+                           merge handles all of the pre-defined column
+                           types. If you are using "$ps->{heap}" storage for
+                           context data, you need to merge that data from
+                           $oldps to $ps yourself.
 
   CONTROL FLOW CONFIGURATION
     filter                 Code, Optional. Before any of the columns are
                            calculated or any of the values saved, run this
                            filter code. If it returns a true value then
                            proceed as normal. If it returns a false value,
-                           then do not consider it for any of the statistics
-                           values. The filter code an remember things in
-                           "$ps-"{heap}> that might effect how other things
-                           are counted. Filtered
+                           then do not count any of the values. The filter
+                           code can remember things in "$ps-"{heap}> that
+                           might effect how other things are counted.
 
                            In some situations, you many want to throw away
                            most data and count things in the filter. When
@@ -288,7 +291,8 @@ DESCRIPTION
                            the context changed.
 
     passthrough            Code, Optional. Add results to the output of the
-                           aggregation. A value of $log adds the input data
+                           aggregation. A value of $log (assuming that's
+                           your input record variable) adds the input data
                            stream to the output stream. The passthrough code
                            is run before the input line is counted.
 
@@ -326,14 +330,14 @@ DESCRIPTION
 
   AGGREGATE OUTPUT COLUMNS CONFIGURATION
     Each of these (except "ephemeral" & "keep") defines additional columns
-    of output that will be included in each aggregation record. Thse are all
-    optional and all defined as key/value pairs where the keys are column
-    names and the values are perl code. You can refer to previous columns
-    using the variable "$column_*column_name*" where *column_name* is the
-    name of one of the other columns. When refering to other columns, the
-    order in which columns are processed matters: "ephemeral" and "keep" are
-    processed first and second respecively. Idential code fragments will be
-    evaluated only once. Within a group, columns are evaluated
+    of output that will be included in each aggregation record. These are
+    all optional and all are defined as key/value pairs where the keys are
+    column names and the values are perl code. You can refer to other
+    columns using the variable "$column_*column_name*" where *column_name*
+    is the name of one of the other columns. When refering to other columns,
+    the order in which columns are processed matters: "ephemeral" and "keep"
+    are processed first and second respecively. Idential code fragments will
+    be evaluated only once. Within a group, columns are evaluated
     alphabetically.
 
     Some of the columns will have their code evaluated per-item and some are
@@ -445,7 +449,7 @@ DESCRIPTION
                            If Stream::Aggregate::Stats functions are called,
                            they will grab the numeric values from
                            "$ps->{keep}{column_name}" and store them in
-                           "$ps->{numeric}{column_name}"
+                           "$ps->{numeric}{column_name}".
 
     $ps->{random}          For each kept item in "$ps->{keep}{column_name}",
                            there is a corrosponding item in $ps->{random}
@@ -569,6 +573,7 @@ DESCRIPTION
       use strict;
       use warnings;
       use Stream::Aggregate;
+      use YAML;
 
       my $aconfig = Load(<<'END_ACONFIG');
       strict:                 1
@@ -658,6 +663,7 @@ EXAMPLE2
       use strict;
       use warnings;
       use Stream::Aggregate;
+      use YAML;
 
       my $aconfig = Load(<<'END_ACONFIG');
       strict:                 1

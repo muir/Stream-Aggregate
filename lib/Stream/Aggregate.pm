@@ -26,7 +26,7 @@ require Exporter;
 
 our @ISA = qw(Exporter);
 our @EXPORT = qw(generate_aggregation_func);
-our $VERSION = 0.401;
+our $VERSION = 0.404;
 
 our $suppress_line_numbers = 0;
 

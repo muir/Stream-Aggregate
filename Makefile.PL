@@ -3,7 +3,7 @@ use ExtUtils::MakeMaker;
 
 WriteMakefile( 
 	'VERSION_FROM' => 'lib/Stream/Aggregate.pm',
-	'NAME' => 'Aggregate',
+	'NAME' => 'Stream-Aggregate',
 	($] >= 5.005 ?
 	('ABSTRACT' => 'Aggregate a data stream',
 	'AUTHOR'   => 'David Muir Sharnoff <muir@idiom.org>') : ()),
@@ -18,7 +18,17 @@ WriteMakefile(
 		'Data::Dumper'		=> 0,
 		'List::MoreUtils'	=> 0,
 		'Clone'		=> 0,
+		'Tie::Function::Examples' => 0
 	},
+	'BUILD_REQUIRES' => {
+		'YAML'		=> 0,
+	},
+	META_MERGE     => {
+		resources  => {
+			repository => 'http://github.com/muir/Stream-Aggregate',
+		},
+	},
+
 );
 
 package MY;
@@ -33,3 +43,4 @@ README: lib/Stream/Aggregate.pod
 
 END_OF_POSTAMBLE
 }
+

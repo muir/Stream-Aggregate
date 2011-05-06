@@ -8,7 +8,6 @@ use Test::More qw(no_plan);
 use YAML;
 
 my $finished = 0;
-
 END { ok($finished, 'finished') }
 
 my $aconfig = Load(<<'END_ACONFIG');

@@ -1,3 +1,17 @@
+= 2011/05/05	0.404
+
+Add missing dependency on Tie::Function::Examples.
+
+= 2011/05/05	0.403
+
+Add in missing build dependency on YAML.
+
+Add reference to github repository.
+
+= 2011/05/04	0.402
+
+Change package from 'Aggregate' to 'Stream-Aggregate'
+
 = 2011/05/03	0.401
 
 Added combinations for cross-product contexts.
