@@ -1,3 +1,8 @@
+= 2011/05/11	0.405
+
+Changed some tests so they're resiliant to math
+variations.
+
 = 2011/05/05	0.404
 
 Add missing dependency on Tie::Function::Examples.

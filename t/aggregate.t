@@ -79,7 +79,7 @@ is($results{bird}{''}{sum_hang_time}, 113);
 is($results{bird}{''}{launch_count}, 9);
 is($results{bird}{'*'}{launch_count}, 16);
 is($results{bird}{38}{sum_hang_time}, 190);
-is($results{bird}{''}{mean_distance}, 54.333333333333333);
+is(sprintf("%.8f", $results{bird}{''}{mean_distance}), 54.33333333);
 is($results{bird}{38}{mean_wingspan}, 23);
 is($results{bird}{'*'}{max_distance}, 1570);
 is($results{bird}{25}{max_distance}, 1570);
@@ -95,7 +95,7 @@ is($results{bird}{25}{median_distance}, 1530);
 is($results{bird}{''}{median_distance}, 55);
 is($results{bird}{''}{median_distance}, 55); # somewhat random
 is($results{bird}{38}{sum_distance}, 2000); 
-is($results{bird}{38}{distance_dev}, 63.4744042902334); 
+is(sprintf("%.8f", $results{bird}{38}{distance_dev}), 63.474404290); 
 is($results{bird}{38}{odd_distance}, 4);
 is($results{bird}{25}{odd_distance}, 0);
 is($results{bird}{25}{distances}, '1520-1530-1570');

@@ -38,13 +38,13 @@ is(dominant('foo'), 7, 'dominant foo');
 # for generating numbers for aggregation tests
 
 is(dominantcount('foo'), 2, 'dominantcount foo');
-is(standard_deviation('house_rem'), 14.142135623731, 'standard deviation - house_rem');
+is(sprintf("%.8f", standard_deviation('house_rem')), 14.14213562, 'standard deviation - house_rem');
 is(standard_deviation('/'), 3493.63919378154, 'standard deviation - /');
-is(mean('house'), 7515.82352941176, 'mean house');
-is(mean('docrank'), 1.84728714420001e-21, 'mean docrank');
-is(standard_deviation('docrank'), 4.15722455760732e-21, 'stddev docrank');
-is(mean('url_depth'), 3.66666666666667, 'url_depth');
+is(sprintf("%.8f", mean('house')), 7515.82352941, 'mean house');
+is(sprintf("%.9g", mean('docrank')), 1.84728714e-21, 'mean docrank');
+is(sprintf("%.9g", standard_deviation('docrank')), 4.15722456e-21, 'stddev docrank');
+is(sprintf("%.8f", mean('url_depth')), 3.66666667, 'url_depth');
 is(median('url_depth'), 4, 'url_depth');
-is(standard_deviation('dist'), 63.4744042902334, 'std_dist');
+is(sprintf("%.8f", standard_deviation('dist')), 63.47440429, 'std_dist');
 
 $finished = 1;
