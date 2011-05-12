@@ -39,7 +39,7 @@ is(dominant('foo'), 7, 'dominant foo');
 
 is(dominantcount('foo'), 2, 'dominantcount foo');
 is(sprintf("%.8f", standard_deviation('house_rem')), 14.14213562, 'standard deviation - house_rem');
-is(standard_deviation('/'), 3493.63919378154, 'standard deviation - /');
+is(sprintf("%.8f", standard_deviation('/')), 3493.63919378, 'standard deviation - /');
 is(sprintf("%.8f", mean('house')), 7515.82352941, 'mean house');
 is(sprintf("%.9g", mean('docrank')), 1.84728714e-21, 'mean docrank');
 is(sprintf("%.9g", standard_deviation('docrank')), 4.15722456e-21, 'stddev docrank');
